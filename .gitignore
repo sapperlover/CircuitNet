@@ -10,3 +10,5 @@ feature_extraction/train.csv
 feature_extraction/test.csv
 
 sample_model_training/work_dir/*
+
+feature_extraction/data/data-zero-riscy-9
