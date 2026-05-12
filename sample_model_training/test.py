@@ -23,6 +23,24 @@ def resize(input, out_shape):
 def build_metric(metric_name):
     return metrics.__dict__[metric_name.lower()]
 
+def load_label_norm_stats(pretrained):
+    if pretrained is None:
+        return None
+    checkpoint = torch.load(pretrained, map_location='cpu')
+    if isinstance(checkpoint, dict):
+        return checkpoint.get('label_norm_stats')
+    return None
+
+def denormalize_channels(data, label_norm_stats):
+    if label_norm_stats is None:
+        return data
+    label_min = np.asarray(label_norm_stats['min'], dtype=np.float32)
+    label_max = np.asarray(label_norm_stats['max'], dtype=np.float32)
+    scale = label_max - label_min
+    scale = np.where(scale == 0, 1.0, scale)
+    shape = (-1,) + (1,) * (data.ndim - 1)
+    return data * scale.reshape(shape) + label_min.reshape(shape)
+
 def test():
     
     argp = Parser()
@@ -51,6 +69,11 @@ def test():
     if pretrained is not None and arg_dict['test_mode']:
         arg_dict['save_path'] = os.path.dirname(pretrained)
 
+    label_norm_stats = arg_dict.get('label_norm_stats', None)
+    if label_norm_stats is None and arg_dict.get('label_norm', True):
+        label_norm_stats = load_label_norm_stats(arg_dict.get('pretrained', None))
+    if label_norm_stats is not None:
+        arg_dict['label_norm_stats'] = label_norm_stats
 
     logger, log_dir = build_logger(arg_dict)
     logger.info(arg_dict)
@@ -107,7 +130,7 @@ def test():
             end_time = time.time()
         logger.info('#{} {}, inference time {}s'.format(count, os.path.basename(instance_IR_drop_path[0][:-4]), end_time - start_time))
 
-        if not arg.final_test:
+        if not arg_dict['final_test']:
             instance_count = np.load(os.path.join(instance_count_path[0])).astype(int)
             instance_name = np.load(instance_name_path[0])['instance_name'] # load npz
         else: # final test, get instance name from power rpt
@@ -115,8 +138,10 @@ def test():
             instance_name = np.load(instance_name_path[0].replace('instance_name', 'instance_name_from_power_rpt'))['instance_name'] # load npz
             
         instance_IR_drop = np.load(instance_IR_drop_path[0])
-        pred_vdd_drop = resize(prediction[0,0,:,:].detach().cpu().numpy(), instance_count.shape)
-        pred_gnd_bounce = resize(prediction[0,1,:,:].detach().cpu().numpy(), instance_count.shape)
+        output_final = prediction[0].detach().cpu().numpy()
+        output_final = denormalize_channels(output_final, label_norm_stats)
+        pred_vdd_drop = resize(output_final[0,:,:], instance_count.shape)
+        pred_gnd_bounce = resize(output_final[1,:,:], instance_count.shape)
         pred_instance_vdd_drop = np.repeat(pred_vdd_drop.ravel(),instance_count.ravel())
         pred_instance_gnd_bounce = np.repeat(pred_gnd_bounce.ravel(),instance_count.ravel())
         
@@ -128,7 +153,7 @@ def test():
             for i,j,k in zip(pred_instance_vdd_drop, pred_instance_gnd_bounce, instance_name):
                 f.write('{} {}\n'.format(i+j,k))
 
-        if not arg.final_test:
+        if not arg_dict['final_test']:
             for metric, metric_func in metrics.items():
                 result = metric_func(instance_IR_drop, pred_instance_vdd_drop + pred_instance_gnd_bounce)
 
@@ -141,7 +166,6 @@ def test():
             save_path = os.path.join(log_dir, 'test_result_visualization')
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
-            output_final = prediction.detach().cpu().squeeze().numpy()
             fig = sns.heatmap(data=output_final[0,:,:], cmap="rainbow").get_figure()
             fig.savefig(os.path.join(save_path, file_name + '_pred_vdd_drop.png'), dpi=100)
             plt.close()
@@ -158,7 +182,7 @@ def test():
         #     break
         count +=1
 
-    if not arg.final_test:
+    if not arg_dict['final_test']:
         for metric, avg_metric in avg_metrics.items():
             logger.info("===> Avg. {}: {:.4f}".format(metric, avg_metric / len(dataset))) 
         for metric, design in split_metrics.items():

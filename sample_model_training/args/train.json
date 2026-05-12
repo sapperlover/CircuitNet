@@ -8,6 +8,7 @@
     "model_type": "FCN",
     "in_channels": 3,
     "out_channels": 2,
+    "label_norm": true,
     "lr": 0.005,
     "weight_decay": 0,
     "loss_type": "MSELoss"

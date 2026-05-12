@@ -13,11 +13,14 @@ from utils.logger import build_logger
 from math import cos, pi
 
  
-def checkpoint(logger, model, epoch, save_path):
+def checkpoint(logger, model, epoch, save_path, label_norm_stats=None):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     model_out_path = f"./{save_path}/model_iters_{epoch}.pth"
-    torch.save({'state_dict': model.state_dict()}, model_out_path)
+    checkpoint_data = {'state_dict': model.state_dict()}
+    if label_norm_stats is not None:
+        checkpoint_data['label_norm_stats'] = label_norm_stats
+    torch.save(checkpoint_data, model_out_path)
     logger.info("Checkpoint saved to {}".format(model_out_path))
         
 def build_loss(args):
@@ -128,6 +131,11 @@ def train():
     logger.info('===> Loading datasets')
     # Initialize dataset
     dataset = build_dataset(arg_dict)
+    label_norm_stats = getattr(getattr(dataset, 'dataset', None), 'label_norm_stats', None)
+    if label_norm_stats is not None:
+        logger.info('label norm stats: {}'.format(label_norm_stats))
+        with open(os.path.join(log_dir, 'label_norm.json'), 'wt') as f:
+            json.dump(label_norm_stats, f, indent=4)
 
     logger.info('===> Building model')
     # Initialize model parameters
@@ -173,7 +181,7 @@ def train():
                 
                 bar.update(1)
                 if iter_num % save_freq == 0:
-                    checkpoint(logger, model, iter_num, log_dir)
+                    checkpoint(logger, model, iter_num, log_dir, label_norm_stats)
                 if iter_num % print_freq == 0:
                     break
 

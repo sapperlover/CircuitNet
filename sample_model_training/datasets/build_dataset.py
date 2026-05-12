@@ -8,6 +8,7 @@ from .augmentation import Flip, Rotation, Crop
 class IterLoader:
     def __init__(self, dataloader):
         self._dataloader = dataloader
+        self.dataset = dataloader.dataset
         self.iter_loader = iter(self._dataloader)
 
     def __next__(self):

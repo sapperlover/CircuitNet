@@ -24,6 +24,21 @@ class Paraser:
         self.instance_count = None
         self.instance_IR_drop = None
 
+    def _resolve_report_path(self, *filenames):
+        for filename in filenames:
+            candidate = os.path.join(self.root_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        raise FileNotFoundError(
+            'missing report under {}. checked: {}'.format(
+                self.root_dir, ', '.join(filenames)
+            )
+        )
+
+    def _read_report(self, *filenames, **kwargs):
+        path = self._resolve_report_path(*filenames)
+        return pd.read_csv(path, compression='infer', **kwargs)
+
     def get_IR_drop_features(self):
         max_size = (1000, 1000)
         self.VDD_drop_map = np.zeros(max_size)
@@ -44,16 +59,40 @@ class Paraser:
 
         try:
             if 'nvdla' in self.root_dir:
-                data_power = pd.read_csv(os.path.join(self.root_dir, 'NV_nvdla.inst.power.rpt.gz'),sep='\s+',header=1, compression='gzip')
+                data_power = self._read_report(
+                    'NV_nvdla.inst.power.rpt.gz',
+                    'NV_nvdla.inst.power.rpt',
+                    sep=r'\s+',
+                    header=1,
+                )
             elif 'Vortex' in self.root_dir:
-                data_power = pd.read_csv(os.path.join(self.root_dir, 'Vortex.inst.power.rpt.gz'),sep='\s+',header=1, compression='gzip')
+                data_power = self._read_report(
+                    'Vortex.inst.power.rpt.gz',
+                    'Vortex.inst.power.rpt',
+                    sep=r'\s+',
+                    header=1,
+                )
             else:
-                data_power = pd.read_csv(os.path.join(self.root_dir, 'pulpino_top.inst.power.rpt.gz'),sep='\s+',header=1, compression='gzip')
-            data_r = pd.read_csv(os.path.join(self.root_dir, 'eff_res.rpt.gz'),sep='\s+', low_memory=False, compression='gzip')
+                data_power = self._read_report(
+                    'pulpino_top.inst.power.rpt.gz',
+                    'pulpino_top.inst.power.rpt',
+                    sep=r'\s+',
+                    header=1,
+                )
+            data_r = self._read_report(
+                'eff_res.rpt.gz',
+                'eff_res.rpt',
+                sep=r'\s+',
+                low_memory=False,
+            )
             if not self.final_test:
-                data_ir = pd.read_csv(os.path.join(self.root_dir, 'static_ir.gz'),sep='\s+', compression='gzip')
+                data_ir = self._read_report(
+                    'static_ir.gz',
+                    'static_ir',
+                    sep=r'\s+',
+                )
         except Exception as e:
-            print('one of the report not exists')
+            print('failed to read reports in {}: {}'.format(self.root_dir, e))
             return 0    
 
         max_x = 0
