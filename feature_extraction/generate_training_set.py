@@ -71,7 +71,7 @@ def parse_args():
     parser.add_argument("--prefix", default = 'sample', type=str, help = 'dir name')
     parser.add_argument("--data_path", default = './out', type=str, help = 'path to the decompressed dataset')
     parser.add_argument("--save_path",  default = './training_set', type=str, help = 'path to save training set')
-    parser.add_argument('--process_capacity', default=2, help='number of process for multi process')
+    parser.add_argument('--process_capacity', type=int, default=2, help='number of process for multi process')
 
     args = parser.parse_args()                                       
     return args
@@ -105,7 +105,6 @@ if __name__ == '__main__':
 
 
     
-
 
 
 

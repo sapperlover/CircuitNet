@@ -6,8 +6,8 @@ __pycache__/*
 
 feature_extraction/out/
 feature_extraction/training_set/
-feature_extraction/train.csv
-feature_extraction/test.csv
+feature_extraction/data/
+feature_extraction/*.csv
 
 sample_model_training/work_dir/*
 
@@ -16,3 +16,4 @@ feature_extraction/data/full/*
 MAUnet/
 
 out/
+
