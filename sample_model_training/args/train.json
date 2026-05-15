@@ -1,15 +1,16 @@
 {   "gpu": 0,
     "save_path": "work_dir/sample/",
-    "batch_size": 1,
-    "max_iters": 1000,
-    "ann_file": "../feature_extraction/train.csv",
+    "batch_size": 16,
+    "max_iters": 50000,
+    "ann_file": "../feature_extraction/train_riscy3_split.csv",
     "dataroot": "../feature_extraction",
     "dataset_type": "TrainDataset",
     "model_type": "FCN",
     "in_channels": 3,
     "out_channels": 2,
-    "label_norm": true,
-    "lr": 0.005,
-    "weight_decay": 0,
-    "loss_type": "MSELoss"
+    "label_norm": false,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "loss_type": "MSELoss",
+    "aug_pipeline": ["Flip"]
 }

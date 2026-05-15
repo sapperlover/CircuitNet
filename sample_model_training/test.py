@@ -77,7 +77,8 @@ def test():
 
     logger, log_dir = build_logger(arg_dict)
     logger.info(arg_dict)
-    if not os.path.exists(os.path.join(log_dir, 'pred_static_ir_report')):
+    save_report = arg_dict.get('save_report', True)
+    if save_report and not os.path.exists(os.path.join(log_dir, 'pred_static_ir_report')):
         os.makedirs(os.path.join(log_dir, 'pred_static_ir_report'))
         
     if arg_dict['cpu']:
@@ -132,10 +133,12 @@ def test():
 
         if not arg_dict['final_test']:
             instance_count = np.load(os.path.join(instance_count_path[0])).astype(int)
-            instance_name = np.load(instance_name_path[0])['instance_name'] # load npz
+            if save_report:
+                instance_name = np.load(instance_name_path[0])['instance_name'] # load npz
         else: # final test, get instance name from power rpt
             instance_count = np.load(instance_count_path[0].replace('instance_count', 'instance_count_from_power_rpt')).astype(int)
-            instance_name = np.load(instance_name_path[0].replace('instance_name', 'instance_name_from_power_rpt'))['instance_name'] # load npz
+            if save_report:
+                instance_name = np.load(instance_name_path[0].replace('instance_name', 'instance_name_from_power_rpt'))['instance_name'] # load npz
             
         instance_IR_drop = np.load(instance_IR_drop_path[0])
         output_final = prediction[0].detach().cpu().numpy()
@@ -149,9 +152,10 @@ def test():
         # 文件为2列，第一列是vdd_drop+gnd_bounce，第二列是inst_name，不需要表头。
         # 文件名为pred_static_ir_{case name}(.gz)。建议按下面的方式以gzip形式输出，文件名加上.gz。若不压缩则不需要.gz。
         file_name = os.path.splitext(os.path.basename(instance_IR_drop_path[0]))[0]
-        with gzip.open('{}/{}/{}'.format(log_dir, 'pred_static_ir_report', 'pred_static_ir_{}.gz'.format(file_name)), 'wt') as f:
-            for i,j,k in zip(pred_instance_vdd_drop, pred_instance_gnd_bounce, instance_name):
-                f.write('{} {}\n'.format(i+j,k))
+        if save_report:
+            with gzip.open('{}/{}/{}'.format(log_dir, 'pred_static_ir_report', 'pred_static_ir_{}.gz'.format(file_name)), 'wt') as f:
+                for i,j,k in zip(pred_instance_vdd_drop, pred_instance_gnd_bounce, instance_name):
+                    f.write('{} {}\n'.format(i+j,k))
 
         if not arg_dict['final_test']:
             for metric, metric_func in metrics.items():
@@ -191,7 +195,10 @@ def test():
             for name, values in design.items():
                 logger.info("===> {} {}: {:.4f}".format(name, metric, values[0] / values[1]))
                  
-    logger.info("Predicted static_ir report saved in {}/{}.".format(log_dir, 'pred_static_ir_report')) 
+    if save_report:
+        logger.info("Predicted static_ir report saved in {}/{}.".format(log_dir, 'pred_static_ir_report')) 
+    else:
+        logger.info("Predicted static_ir report was not saved because save_report=false.") 
 
 
 if __name__ == "__main__":

@@ -3,6 +3,16 @@ import os
 import sys
 sys.path.append(os.getcwd())
 
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in ('true', '1', 'yes', 'y'):
+        return True
+    if value in ('false', '0', 'no', 'n'):
+        return False
+    raise argparse.ArgumentTypeError('expected a boolean value')
+
 class Parser(object):
     def __init__(self) -> None:
         self.parser = argparse.ArgumentParser()
@@ -34,3 +44,4 @@ class Parser(object):
         self.parser.add_argument('--plot', default=False, help='Plot the prediction and label in testing.')
         self.parser.add_argument('--eval_metric', default=["MAE", "corrcoef"], help='Metrics.')
         self.parser.add_argument('--final_test', default=False, help='prevent using static_ir to mimic the final environment.')
+        self.parser.add_argument('--save_report', type=str2bool, default=True, help='Save predicted static_ir report during testing.')
