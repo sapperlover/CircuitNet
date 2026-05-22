@@ -26,6 +26,11 @@ def checkpoint(logger, model, epoch, save_path, label_norm_stats=None):
 def build_loss(args):
     return losses.__dict__[args.pop('loss_type')]()
 
+def to_jsonable(value):
+    if hasattr(value, 'tolist'):
+        return value.tolist()
+    return value
+
 class CosineRestartLr(object):
     def __init__(self,
                  base_lr,
@@ -122,8 +127,9 @@ def train():
         device = torch.device("cuda", arg_dict['gpu'])
         logger.info('using gpu {} for training'.format(arg_dict['gpu']))
 
+    saved_arg_dict = dict(arg_dict)
     with open(os.path.join(log_dir, 'train.json'), 'wt') as f:
-      json.dump(arg_dict, f, indent=4)
+      json.dump(saved_arg_dict, f, indent=4)
 
     # Initialize tensorboard writer
     writer = SummaryWriter(log_dir)
@@ -131,7 +137,24 @@ def train():
     logger.info('===> Loading datasets')
     # Initialize dataset
     dataset = build_dataset(arg_dict)
-    label_norm_stats = getattr(getattr(dataset, 'dataset', None), 'label_norm_stats', None)
+    train_dataset = getattr(dataset, 'dataset', None)
+    label_norm_stats = getattr(train_dataset, 'label_norm_stats', None)
+    power_epsilon = getattr(train_dataset, 'power_epsilon', None)
+    target_clip_max = getattr(train_dataset, 'target_clip_max', None)
+    rewrite_train_config = False
+    if power_epsilon is not None:
+        arg_dict['power_epsilon'] = power_epsilon
+        saved_arg_dict['power_epsilon'] = to_jsonable(power_epsilon)
+        logger.info('power epsilon: {}'.format(power_epsilon))
+        rewrite_train_config = True
+    if target_clip_max is not None:
+        arg_dict['target_clip_max'] = target_clip_max
+        saved_arg_dict['target_clip_max'] = to_jsonable(target_clip_max)
+        logger.info('target clip max: {}'.format(target_clip_max))
+        rewrite_train_config = True
+    if rewrite_train_config:
+        with open(os.path.join(log_dir, 'train.json'), 'wt') as f:
+            json.dump(saved_arg_dict, f, indent=4)
     if label_norm_stats is not None:
         logger.info('label norm stats: {}'.format(label_norm_stats))
         with open(os.path.join(log_dir, 'label_norm.json'), 'wt') as f:

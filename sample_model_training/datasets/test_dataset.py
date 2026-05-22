@@ -33,7 +33,7 @@ class TestDataset(object):
         
         feature = np.load(results['feature_path']).transpose(2, 0, 1).astype(np.float32)
         label = np.load(results['label_path']).transpose(2, 0, 1).astype(np.float32)
-        return feature, label,  results['instance_count_path'], results['instance_IR_drop_path'], results['instance_name_path']
+        return feature, label, results['instance_count_path'], results['instance_IR_drop_path'], results['instance_name_path'], results['feature_path']
 
 
     def __len__(self):

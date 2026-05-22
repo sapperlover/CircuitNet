@@ -62,6 +62,18 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
             print(err_msg)
     return missing_keys
 
+def build_output_activation(name):
+    name = name.lower()
+    if name in ('none', 'linear', 'identity'):
+        return nn.Identity()
+    if name == 'sigmoid':
+        return nn.Sigmoid()
+    if name == 'softplus':
+        return nn.Softplus()
+    if name == 'relu':
+        return nn.ReLU(inplace=True)
+    raise ValueError('Unsupported output activation: {}'.format(name))
+
 class conv(nn.Module):
     def __init__(self, dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=True):
         super(conv, self).__init__()
@@ -117,7 +129,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, out_dim=2, in_dim=32):
+    def __init__(self, out_dim=2, in_dim=32, out_activation='sigmoid'):
         super(Decoder, self).__init__()
         self.conv1 = conv(in_dim, 32)
         self.upc1 = upconv(32, 16)
@@ -125,7 +137,7 @@ class Decoder(nn.Module):
         self.upc2 = upconv(32+16, 4)
         self.conv3 =  nn.Sequential(
                 nn.Conv2d(4, out_dim, 3, 1, 1),
-                nn.Sigmoid()
+                build_output_activation(out_activation)
                 )
 
     def init_weights(self):
@@ -145,11 +157,12 @@ class FCN(nn.Module):
     def __init__(self,
                  in_channels=3,
                  out_channels=2,
+                 out_activation='sigmoid',
                  **kwargs):
         super().__init__()
 
         self.encoder = Encoder(in_dim=in_channels)
-        self.decoder = Decoder(out_dim=out_channels)
+        self.decoder = Decoder(out_dim=out_channels, out_activation=out_activation)
 
     def forward(self, x):
         x = self.encoder(x)

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import time
+from pathlib import Path
 from datasets.build_dataset import build_dataset
 import utils.metrics as metrics
 from models.build_model import build_model
@@ -20,6 +21,11 @@ def resize(input, out_shape):
     result = ndimage.zoom(input, (out_shape[0] / dimension[0], out_shape[1] / dimension[1]), order=3)
     return result
 
+def resize_scale(input, out_shape):
+    dimension = input.shape
+    result = ndimage.zoom(input, (out_shape[0] / dimension[0], out_shape[1] / dimension[1]), order=1)
+    return result
+
 def build_metric(metric_name):
     return metrics.__dict__[metric_name.lower()]
 
@@ -31,6 +37,15 @@ def load_label_norm_stats(pretrained):
         return checkpoint.get('label_norm_stats')
     return None
 
+def load_train_config(pretrained):
+    if pretrained is None:
+        return {}
+    config_path = os.path.join(os.path.dirname(pretrained), 'train.json')
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path, 'rt') as f:
+        return json.load(f)
+
 def denormalize_channels(data, label_norm_stats):
     if label_norm_stats is None:
         return data
@@ -40,6 +55,68 @@ def denormalize_channels(data, label_norm_stats):
     scale = np.where(scale == 0, 1.0, scale)
     shape = (-1,) + (1,) * (data.ndim - 1)
     return data * scale.reshape(shape) + label_min.reshape(shape)
+
+def resolve_out_feature_path(feature_path, feature_name):
+    path = Path(feature_path)
+    parts = path.parts
+    if 'training_set' not in parts:
+        raise ValueError('feature path does not contain training_set: {}'.format(feature_path))
+    index = parts.index('training_set')
+    tech = parts[index + 1]
+    filename = path.name
+    root = Path(*parts[:index]) if index > 0 else Path('.')
+    return root / 'out' / tech / 'features' / feature_name / filename
+
+def load_smooth_feature(feature_path, feature_name, out_shape, sigma):
+    feature_map_path = resolve_out_feature_path(feature_path, feature_name)
+    feature_map = np.load(feature_map_path).astype(np.float32)
+    feature_map = resize_scale(feature_map, out_shape)
+    feature_map = np.maximum(feature_map, 0.0)
+    return ndimage.gaussian_filter(feature_map, sigma=sigma, mode='nearest')
+
+def build_scale_base(feature_path, out_shape, arg_dict):
+    label_scale_mode = arg_dict.get('label_scale_mode', 'none')
+    if label_scale_mode == 'smooth_power':
+        return load_smooth_feature(
+            feature_path,
+            'total_power',
+            out_shape,
+            arg_dict.get('power_smooth_sigma', 5.0),
+        )[:, :, None]
+    if label_scale_mode == 'power_effres':
+        power = load_smooth_feature(
+            feature_path,
+            'total_power',
+            out_shape,
+            arg_dict.get('power_smooth_sigma', 5.0),
+        )
+        eff_vdd = load_smooth_feature(
+            feature_path,
+            'eff_res_VDD',
+            out_shape,
+            arg_dict.get('effres_smooth_sigma', 5.0),
+        )
+        eff_vss = load_smooth_feature(
+            feature_path,
+            'eff_res_VSS',
+            out_shape,
+            arg_dict.get('effres_smooth_sigma', 5.0),
+        )
+        return np.stack([power * eff_vdd, power * eff_vss], axis=2)
+    raise ValueError('Unsupported label_scale_mode: {}'.format(label_scale_mode))
+
+def build_label_scale(feature_path, out_shape, arg_dict):
+    label_scale_mode = arg_dict.get('label_scale_mode', 'none')
+    if label_scale_mode in (None, 'none'):
+        return None
+    scale_base = build_scale_base(feature_path, out_shape, arg_dict)
+
+    power_epsilon = arg_dict.get('power_epsilon', None)
+    if power_epsilon is None:
+        epsilon = np.maximum(scale_base.max(axis=(0, 1)) * arg_dict.get('power_epsilon_ratio', 0.01), 1e-12)
+    else:
+        epsilon = np.asarray(power_epsilon, dtype=np.float32)
+    return (scale_base + epsilon.reshape(1, 1, -1)).astype(np.float32)
 
 def test():
     
@@ -68,6 +145,22 @@ def test():
         arg_dict['pretrained'] = pretrained
     if pretrained is not None and arg_dict['test_mode']:
         arg_dict['save_path'] = os.path.dirname(pretrained)
+
+    train_config = load_train_config(arg_dict.get('pretrained', None))
+    checkpoint_config_keys = [
+        'out_activation',
+        'label_norm',
+        'label_scale_mode',
+        'power_smooth_sigma',
+        'effres_smooth_sigma',
+        'power_epsilon_mode',
+        'power_epsilon_ratio',
+        'target_scale_factor',
+        'power_epsilon',
+    ]
+    for key in checkpoint_config_keys:
+        if key in train_config:
+            arg_dict[key] = train_config[key]
 
     label_norm_stats = arg_dict.get('label_norm_stats', None)
     if label_norm_stats is None and arg_dict.get('label_norm', True):
@@ -106,7 +199,7 @@ def test():
 
     count = 1
     start = True
-    for feature, label, instance_count_path, instance_IR_drop_path, instance_name_path in dataset:
+    for feature, label, instance_count_path, instance_IR_drop_path, instance_name_path, feature_path in dataset:
         design_name = os.path.basename(instance_IR_drop_path[0])
         if 'FPU' in design_name:
             design_name = 'RISCY-FPU'
@@ -143,6 +236,10 @@ def test():
         instance_IR_drop = np.load(instance_IR_drop_path[0])
         output_final = prediction[0].detach().cpu().numpy()
         output_final = denormalize_channels(output_final, label_norm_stats)
+        label_scale = build_label_scale(feature_path[0], output_final.shape[1:], arg_dict)
+        if label_scale is not None:
+            target_scale_factor = arg_dict.get('target_scale_factor', 1.0)
+            output_final = output_final / target_scale_factor * label_scale.transpose(2, 0, 1)
         pred_vdd_drop = resize(output_final[0,:,:], instance_count.shape)
         pred_gnd_bounce = resize(output_final[1,:,:], instance_count.shape)
         pred_instance_vdd_drop = np.repeat(pred_vdd_drop.ravel(),instance_count.ravel())
