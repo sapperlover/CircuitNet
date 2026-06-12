@@ -1,9 +1,11 @@
 {
     "gpu": 0,
     "save_path": "work_dir/resunet_e02_smooth_power/",
-    "ann_file": "../feature_extraction/test_riscy3_split.csv",
+    "batch_size": 8,
+    "max_iters": 50000,
+    "ann_file": "../feature_extraction/train_riscy3_split.csv",
     "dataroot": "../feature_extraction",
-    "dataset_type": "TestDataset",
+    "dataset_type": "TrainDataset",
     "model_type": "ResUNet",
     "in_channels": 3,
     "out_channels": 2,
@@ -13,16 +15,22 @@
     "out_activation": "softplus",
     "label_norm": false,
     "label_scale_mode": "smooth_power",
+    "label_clip_min": 0.0,
     "power_smooth_sigma": 5.0,
     "power_epsilon_mode": "train_nonzero_mean",
     "power_epsilon_ratio": 0.05,
     "target_scale_factor": 0.0005,
     "target_clip_max": 5.0,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "loss_type": "L1Loss",
+    "aug_pipeline": [
+        "Flip"
+    ],
+    "plot": false,
     "eval_metric": [
         "MAE",
         "corrcoef"
     ],
-    "pretrained": null,
-    "final_test": false,
-    "save_report": false
+    "final_test": false
 }

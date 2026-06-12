@@ -1,0 +1,82 @@
+{
+    "gpu": 0,
+    "save_path": "work_dir/scalar_gated_resunet_dualstem10_aspp_no_film_e02_smooth_power_corr_loss/",
+    "batch_size": 8,
+    "max_iters": 50000,
+    "ann_file": "../feature_extraction/train_riscy3_split.csv",
+    "dataroot": "../feature_extraction",
+    "dataset_type": "TrainDataset",
+    "model_type": "ScalarGatedResUNet",
+    "in_channels": 10,
+    "out_channels": 2,
+    "base_channels": 32,
+    "norm_type": "instance",
+    "negative_slope": 0.2,
+    "out_activation": "softplus",
+    "scalar_channels": 4,
+    "scalar_hidden_channels": 32,
+    "scalar_embedding_channels": 64,
+    "scale_log_clamp": 1.5,
+    "require_scalar": true,
+    "use_scalar_film": false,
+    "scalar_film_layers": [
+        "e3",
+        "b",
+        "d3"
+    ],
+    "scalar_film_strength": 0.1,
+    "use_aspp": true,
+    "aspp_dilations": [
+        1,
+        2,
+        4,
+        8
+    ],
+    "aspp_res_scale": 0.2,
+    "use_dual_stem": true,
+    "relative_in_channels": 3,
+    "physics_in_channels": 7,
+    "map_input_features": [
+        "total_power_norm",
+        "eff_res_VDD_norm",
+        "eff_res_VSS_norm",
+        "smooth_power_norm",
+        "local_occupancy_map",
+        "local_z_power",
+        "local_z_eff_res_VDD",
+        "local_z_eff_res_VSS",
+        "log_smooth_power_eff_res_VDD",
+        "log_smooth_power_eff_res_VSS"
+    ],
+    "local_window_size": 9,
+    "local_z_clip": 5.0,
+    "scalar_input_stats": [
+        "log_total_power_sum",
+        "log_eff_res_VDD_p50",
+        "log_eff_res_VSS_p95",
+        "occupancy_ratio"
+    ],
+    "scalar_norm": true,
+    "label_norm": false,
+    "label_scale_mode": "smooth_power",
+    "label_clip_min": 0.0,
+    "power_smooth_sigma": 5.0,
+    "power_epsilon_mode": "train_nonzero_mean",
+    "power_epsilon_ratio": 0.05,
+    "target_scale_factor": 0.0005,
+    "target_clip_max": 5.0,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "loss_type": "L1CorrLoss",
+    "corr_loss_weight": 0.1,
+    "corr_eps": 0.000001,
+    "aug_pipeline": [
+        "Flip"
+    ],
+    "plot": false,
+    "eval_metric": [
+        "MAE",
+        "corrcoef"
+    ],
+    "final_test": false
+}

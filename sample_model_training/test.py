@@ -29,6 +29,15 @@ def resize_scale(input, out_shape):
 def build_metric(metric_name):
     return metrics.__dict__[metric_name.lower()]
 
+def move_to_device(data, device):
+    if torch.is_tensor(data):
+        return data.to(device)
+    if isinstance(data, dict):
+        return {key: move_to_device(value, device) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return type(data)(move_to_device(value, device) for value in data)
+    return data
+
 def load_label_norm_stats(pretrained):
     if pretrained is None:
         return None
@@ -103,6 +112,30 @@ def build_scale_base(feature_path, out_shape, arg_dict):
             arg_dict.get('effres_smooth_sigma', 5.0),
         )
         return np.stack([power * eff_vdd, power * eff_vss], axis=2)
+    if label_scale_mode in ('smooth_power_effres_alpha', 'power_effres_alpha'):
+        alpha = float(arg_dict.get('effres_alpha', 0.25))
+        power = load_smooth_feature(
+            feature_path,
+            'total_power',
+            out_shape,
+            arg_dict.get('power_smooth_sigma', 5.0),
+        )
+        eff_vdd = load_smooth_feature(
+            feature_path,
+            'eff_res_VDD',
+            out_shape,
+            arg_dict.get('effres_smooth_sigma', 5.0),
+        )
+        eff_vss = load_smooth_feature(
+            feature_path,
+            'eff_res_VSS',
+            out_shape,
+            arg_dict.get('effres_smooth_sigma', 5.0),
+        )
+        return np.stack([
+            power * np.power(np.maximum(eff_vdd, 0.0), alpha),
+            power * np.power(np.maximum(eff_vss, 0.0), alpha),
+        ], axis=2)
     raise ValueError('Unsupported label_scale_mode: {}'.format(label_scale_mode))
 
 def build_label_scale(feature_path, out_shape, arg_dict):
@@ -148,15 +181,45 @@ def test():
 
     train_config = load_train_config(arg_dict.get('pretrained', None))
     checkpoint_config_keys = [
+        'model_type',
+        'in_channels',
+        'out_channels',
+        'base_channels',
+        'norm_type',
+        'negative_slope',
+        'scalar_channels',
+        'scalar_hidden_channels',
+        'scalar_embedding_channels',
+        'scale_log_clamp',
+        'require_scalar',
+        'use_scalar_film',
+        'scalar_film_layers',
+        'scalar_film_strength',
+        'use_aspp',
+        'aspp_dilations',
+        'aspp_branch_channels',
+        'aspp_res_scale',
+        'use_dual_stem',
+        'relative_in_channels',
+        'physics_in_channels',
+        'map_input_features',
+        'local_window_size',
+        'local_z_clip',
+        'scalar_input_stats',
+        'scalar_norm',
+        'scalar_norm_stats',
         'out_activation',
         'label_norm',
         'label_scale_mode',
+        'effres_alpha',
         'power_smooth_sigma',
         'effres_smooth_sigma',
         'power_epsilon_mode',
         'power_epsilon_ratio',
         'target_scale_factor',
         'power_epsilon',
+        'map_feature_norm_stats',
+        'map_feature_std_clip',
     ]
     for key in checkpoint_config_keys:
         if key in train_config:
@@ -216,7 +279,7 @@ def test():
             end_time = time.time()
 
         else:
-            input = feature.to(device)
+            input = move_to_device(feature, device)
             torch.cuda.synchronize()
             start_time = time.time()
             prediction = model(input)

@@ -5,6 +5,8 @@ from pathlib import Path
 from scipy import ndimage
 from torchvision.transforms import Compose
 
+from .map_features import MapFeatureBuilder
+
 class TrainDataset(object):
     def __init__(self, ann_file, dataroot, pipeline=None, test_mode=False, **kwargs):
         super().__init__()
@@ -15,6 +17,9 @@ class TrainDataset(object):
         self.label_clip_min = kwargs.get('label_clip_min', None)
         self.label_clip_max = kwargs.get('label_clip_max', None)
         self.label_scale_mode = kwargs.get('label_scale_mode', 'none')
+        self.effres_alpha = float(kwargs.get('effres_alpha', 0.25))
+        self.aux_label_scale_mode = kwargs.get('aux_label_scale_mode', None)
+        self.aux_effres_alpha = float(kwargs.get('aux_effres_alpha', self.effres_alpha))
         self.power_smooth_sigma = kwargs.get('power_smooth_sigma', 5.0)
         self.effres_smooth_sigma = kwargs.get('effres_smooth_sigma', 5.0)
         self.power_epsilon = kwargs.get('power_epsilon', None)
@@ -22,16 +27,49 @@ class TrainDataset(object):
         self.power_epsilon_ratio = kwargs.get('power_epsilon_ratio', 0.01)
         self.target_scale_factor = kwargs.get('target_scale_factor', 1.0)
         self.target_clip_max = kwargs.get('target_clip_max', None)
+        self.scalar_input_stats = self.parse_scalar_input_stats(kwargs.get('scalar_input_stats', []))
+        self.scalar_norm = kwargs.get('scalar_norm', True)
+        self.scalar_norm_stats = kwargs.get('scalar_norm_stats', None)
+        self.map_feature_norm_stats = kwargs.get('map_feature_norm_stats', None)
+        self.return_label_scale = kwargs.get('return_label_scale', False) or kwargs.get('loss_type') in (
+            'TargetIRL1Loss',
+            'TargetPhysCorrLoss',
+        )
+        if self.return_label_scale and self.label_norm:
+            raise ValueError('TargetIRL1Loss does not support label_norm=True')
+        self.map_feature_builder = MapFeatureBuilder(
+            kwargs.get('map_input_features', None),
+            power_smooth_sigma=self.power_smooth_sigma,
+            local_window_size=kwargs.get('local_window_size', 9),
+            local_z_clip=kwargs.get('local_z_clip', 5.0),
+            norm_stats=self.map_feature_norm_stats,
+            std_clip=kwargs.get('map_feature_std_clip', None),
+        )
         if pipeline:
             self.pipeline = Compose(pipeline)
             if self.uses_label_scale():
                 for transform in self.pipeline.transforms:
                     if hasattr(transform, 'keys') and 'label_scale' not in transform.keys:
                         transform.keys.append('label_scale')
+                    if self.return_label_scale and hasattr(transform, 'keys') and 'label_ir' not in transform.keys:
+                        transform.keys.append('label_ir')
+                    if self.aux_label_scale_mode and hasattr(transform, 'keys') and 'aux_label_scale' not in transform.keys:
+                        transform.keys.append('aux_label_scale')
         else:
             self.pipeline = None
 
         self.data_infos = self.load_annotations()
+        if self.scalar_input_stats:
+            if self.scalar_norm_stats is not None:
+                self.scalar_norm_stats = self.normalize_scalar_norm_stats(self.scalar_norm_stats)
+            elif self.scalar_norm:
+                self.scalar_norm_stats = self.compute_scalar_norm_stats()
+        if self.map_feature_builder.requires_norm_stats():
+            if self.map_feature_norm_stats is not None:
+                self.map_feature_builder.set_norm_stats(self.map_feature_norm_stats)
+            else:
+                self.map_feature_norm_stats = self.compute_map_feature_norm_stats()
+                self.map_feature_builder.set_norm_stats(self.map_feature_norm_stats)
         self.power_epsilon = self.resolve_power_epsilon()
         self.target_clip_max = self.resolve_target_clip_max()
         self.label_min = None
@@ -83,6 +121,78 @@ class TrainDataset(object):
     def uses_fixed_power_epsilon(self):
         return self.power_epsilon_mode in ('train_nonzero_mean', 'fixed')
 
+    def parse_scalar_input_stats(self, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return list(value)
+
+    def normalize_scalar_norm_stats(self, stats):
+        mean = np.asarray(stats['mean'], dtype=np.float32)
+        std = np.asarray(stats['std'], dtype=np.float32)
+        std = np.where(std < 1e-6, 1.0, std)
+        return {'mean': mean.tolist(), 'std': std.tolist()}
+
+    def positive_values(self, data):
+        values = np.asarray(data, dtype=np.float64)
+        return values[np.isfinite(values) & (values > 0)]
+
+    def safe_log(self, value, eps=1e-30):
+        return float(np.log(max(float(value), eps)))
+
+    def log_positive_percentile(self, data, percentile):
+        values = self.positive_values(data)
+        if values.size == 0:
+            return 0.0
+        return self.safe_log(np.percentile(values, percentile))
+
+    def load_out_feature(self, feature_path, feature_name):
+        return np.load(self.resolve_out_feature_path(feature_path, feature_name))
+
+    def build_scalar_input(self, feature_path, normalize=True):
+        cache = {}
+
+        def get_feature(name):
+            if name not in cache:
+                cache[name] = self.load_out_feature(feature_path, name)
+            return cache[name]
+
+        values = []
+        for stat in self.scalar_input_stats:
+            if stat == 'log_total_power_sum':
+                values.append(self.safe_log(np.sum(self.positive_values(get_feature('total_power')))))
+            elif stat == 'log_eff_res_VDD_p50':
+                values.append(self.log_positive_percentile(get_feature('eff_res_VDD'), 50))
+            elif stat == 'log_eff_res_VDD_p95':
+                values.append(self.log_positive_percentile(get_feature('eff_res_VDD'), 95))
+            elif stat == 'log_eff_res_VSS_p50':
+                values.append(self.log_positive_percentile(get_feature('eff_res_VSS'), 50))
+            elif stat == 'log_eff_res_VSS_p95':
+                values.append(self.log_positive_percentile(get_feature('eff_res_VSS'), 95))
+            elif stat == 'occupancy_ratio':
+                total_power = get_feature('total_power')
+                values.append(float(np.count_nonzero(total_power) / total_power.size) if total_power.size else 0.0)
+            else:
+                raise ValueError('Unsupported scalar input stat: {}'.format(stat))
+
+        scalar = np.asarray(values, dtype=np.float32)
+        if normalize and self.scalar_norm and self.scalar_norm_stats is not None:
+            mean = np.asarray(self.scalar_norm_stats['mean'], dtype=np.float32)
+            std = np.asarray(self.scalar_norm_stats['std'], dtype=np.float32)
+            scalar = (scalar - mean) / std
+        return scalar.astype(np.float32)
+
+    def compute_scalar_norm_stats(self):
+        scalars = [self.build_scalar_input(info['feature_path'], normalize=False) for info in self.data_infos]
+        if not scalars:
+            return None
+        scalars = np.stack(scalars, axis=0).astype(np.float32)
+        mean = scalars.mean(axis=0)
+        std = scalars.std(axis=0)
+        std = np.where(std < 1e-6, 1.0, std)
+        return {'mean': mean.tolist(), 'std': std.tolist()}
+
     def resize_map(self, data, out_shape):
         if data.shape == tuple(out_shape):
             return data
@@ -113,17 +223,33 @@ class TrainDataset(object):
         feature_map = np.maximum(feature_map, 0.0)
         return ndimage.gaussian_filter(feature_map, sigma=sigma, mode='nearest')
 
-    def build_scale_base(self, feature_path, out_shape):
-        if self.label_scale_mode == 'smooth_power':
+    def build_scale_base(self, feature_path, out_shape, mode=None, effres_alpha=None):
+        label_scale_mode = self.label_scale_mode if mode is None else mode
+        alpha = self.effres_alpha if effres_alpha is None else float(effres_alpha)
+        if label_scale_mode == 'smooth_power':
             return self.load_smooth_power(feature_path, out_shape)[:, :, None]
-        if self.label_scale_mode == 'power_effres':
+        if label_scale_mode == 'power_effres':
             power = self.load_smooth_power(feature_path, out_shape)
             eff_vdd = self.load_smooth_feature(feature_path, 'eff_res_VDD', out_shape, self.effres_smooth_sigma)
             eff_vss = self.load_smooth_feature(feature_path, 'eff_res_VSS', out_shape, self.effres_smooth_sigma)
             scale_vdd = power * eff_vdd
             scale_vss = power * eff_vss
             return np.stack([scale_vdd, scale_vss], axis=2)
-        raise ValueError('Unsupported label_scale_mode: {}'.format(self.label_scale_mode))
+        if label_scale_mode in ('smooth_power_effres_alpha', 'power_effres_alpha'):
+            power = self.load_smooth_power(feature_path, out_shape)
+            eff_vdd = self.load_smooth_feature(feature_path, 'eff_res_VDD', out_shape, self.effres_smooth_sigma)
+            eff_vss = self.load_smooth_feature(feature_path, 'eff_res_VSS', out_shape, self.effres_smooth_sigma)
+            scale_vdd = power * np.power(np.maximum(eff_vdd, 0.0), alpha)
+            scale_vss = power * np.power(np.maximum(eff_vss, 0.0), alpha)
+            return np.stack([scale_vdd, scale_vss], axis=2)
+        raise ValueError('Unsupported label_scale_mode: {}'.format(label_scale_mode))
+
+    def compute_map_feature_norm_stats(self):
+        return self.map_feature_builder.compute_norm_stats(
+            [info['feature_path'] for info in self.data_infos],
+            lambda feature_path: np.load(feature_path),
+            self.resolve_out_feature_path,
+        )
 
     def compute_train_nonzero_scale_mean(self):
         total = None
@@ -196,15 +322,17 @@ class TrainDataset(object):
             return None
         return float(np.percentile(np.concatenate(samples), percentile))
 
-    def build_label_scale(self, feature_path, out_shape):
-        if not self.uses_label_scale():
+    def build_label_scale(self, feature_path, out_shape, mode=None, effres_alpha=None):
+        label_scale_mode = self.label_scale_mode if mode is None else mode
+        if label_scale_mode in (None, 'none'):
             return None
-        scale_base = self.build_scale_base(feature_path, out_shape)
+        scale_base = self.build_scale_base(feature_path, out_shape, mode=label_scale_mode, effres_alpha=effres_alpha)
 
-        if self.power_epsilon is None:
-            epsilon = np.maximum(scale_base.max(axis=(0, 1)) * self.power_epsilon_ratio, 1e-12)
-        else:
+        use_main_epsilon = mode is None
+        if use_main_epsilon and self.power_epsilon is not None:
             epsilon = np.asarray(self.power_epsilon, dtype=np.float32)
+        else:
+            epsilon = np.maximum(scale_base.max(axis=(0, 1)) * self.power_epsilon_ratio, 1e-12)
         return np.ascontiguousarray((scale_base + epsilon.reshape(1, 1, -1)).astype(np.float32))
 
     def apply_label_scale(self, label, feature_path, apply_clip=True):
@@ -229,10 +357,23 @@ class TrainDataset(object):
 
     def prepare_data(self, idx):
         results = copy.deepcopy(self.data_infos[idx])
-        results['feature'] = np.load(results['feature_path'])
+        base_feature = np.load(results['feature_path'])
+        results['feature'] = self.map_feature_builder.build(
+            results['feature_path'], base_feature, self.resolve_out_feature_path
+        )
         results['label'] = np.load(results['label_path'])
+        scalar = self.build_scalar_input(results['feature_path']) if self.scalar_input_stats else None
         if self.uses_label_scale():
             results['label_scale'] = self.build_label_scale(results['feature_path'], results['label'].shape[:2])
+            if self.return_label_scale:
+                results['label_ir'] = self.clip_label(results['label'].copy())
+                if self.aux_label_scale_mode:
+                    results['aux_label_scale'] = self.build_label_scale(
+                        results['feature_path'],
+                        results['label'].shape[:2],
+                        mode=self.aux_label_scale_mode,
+                        effres_alpha=self.aux_effres_alpha,
+                    )
 
         results = self.pipeline(results) if self.pipeline else results
 
@@ -247,7 +388,17 @@ class TrainDataset(object):
         
         feature =  results['feature'].transpose(2, 0, 1).astype(np.float32)
         label = results['label'].transpose(2, 0, 1).astype(np.float32)
+        if self.return_label_scale:
+            label = {
+                'target': label,
+                'ir': results['label_ir'].transpose(2, 0, 1).astype(np.float32),
+                'label_scale': results['label_scale'].transpose(2, 0, 1).astype(np.float32),
+            }
+            if self.aux_label_scale_mode:
+                label['aux_label_scale'] = results['aux_label_scale'].transpose(2, 0, 1).astype(np.float32)
 
+        if scalar is not None:
+            feature = {'map': feature, 'scalar': scalar}
         return feature, label, results['label_path']
 
     def __len__(self):

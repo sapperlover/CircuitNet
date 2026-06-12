@@ -17,7 +17,7 @@ class Parser(object):
     def __init__(self) -> None:
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument('--save_path', default='work_dir/sample/', help='Save path.')
-        self.parser.add_argument('--args', default=None, help='Path to json arguments file.')
+        self.parser.add_argument('--args', '--arg_file', dest='args', default=None, help='Path to json arguments file.')
         self.parser.add_argument('--cpu', action='store_true', help='Use CPU for training or testing, overwrite gpu argument.')
         self.parser.add_argument('--gpu', default=None, help='Specify GPU ID to use.')
 
