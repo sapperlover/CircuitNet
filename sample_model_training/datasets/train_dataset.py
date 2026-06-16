@@ -34,6 +34,7 @@ class TrainDataset(object):
         self.return_label_scale = kwargs.get('return_label_scale', False) or kwargs.get('loss_type') in (
             'TargetIRL1Loss',
             'TargetPhysCorrLoss',
+            'DualHeadPhysLoss',
         )
         if self.return_label_scale and self.label_norm:
             raise ValueError('TargetIRL1Loss does not support label_norm=True')

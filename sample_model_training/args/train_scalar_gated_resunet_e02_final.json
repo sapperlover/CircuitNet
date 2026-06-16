@@ -77,6 +77,15 @@
     "phys_norm": "mean",
     "norm_eps": 1e-12,
     "corr_eps": 1e-6,
+    "hotspot_loss_weight": 0.1,
+    "hotspot_percentile": 95.0,
+    "hotspot_weight": 2.0,
+    "hotspot_beta": 0.1,
+    "hotspot_positive_only": true,
+    "hotspot_min_value": 1e-9,
+    "hotspot_min_positive_pixels": 16,
+    "gradient_loss_weight": 0.05,
+    "gradient_beta": 0.1,
     "aug_pipeline": [
         "Flip"
     ],

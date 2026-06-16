@@ -1,7 +1,7 @@
 {
     "gpu": 0,
     "save_path": "work_dir/resunet_e02_smooth_power/",
-    "ann_file": "../feature_extraction/test_riscy3_split.csv",
+    "ann_file": "../feature_extraction/test_riscy3_split_plus_nvdla_vortex.csv",
     "dataroot": "../feature_extraction",
     "dataset_type": "TestDataset",
     "model_type": "ResUNet",

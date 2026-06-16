@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -229,6 +231,50 @@ class ScaleHead(nn.Module):
         return self.net(torch.cat([pooled, scalar_embedding], dim=1)).view(bottleneck.size(0), -1, 1, 1)
 
 
+class FusionGateHead(nn.Module):
+    def __init__(
+        self,
+        bottleneck_channels,
+        scalar_channels,
+        hidden_channels=64,
+        out_channels=2,
+        gate_min=0.0,
+        gate_max=0.2,
+        gate_init=0.02,
+        negative_slope=0.2,
+    ):
+        super().__init__()
+        self.gate_min = float(gate_min)
+        self.gate_max = float(gate_max)
+        self.gate_init = float(gate_init)
+        if self.gate_max < self.gate_min:
+            raise ValueError("gate_max must be >= gate_min")
+        self.output = nn.Linear(hidden_channels, out_channels)
+        self.net = nn.Sequential(
+            nn.Linear(bottleneck_channels + scalar_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.LeakyReLU(negative_slope, inplace=True),
+            self.output,
+        )
+        self.reset_gate()
+
+    def reset_gate(self):
+        nn.init.zeros_(self.output.weight)
+        if self.gate_max <= self.gate_min:
+            nn.init.zeros_(self.output.bias)
+            return
+        ratio = (self.gate_init - self.gate_min) / (self.gate_max - self.gate_min)
+        ratio = min(max(ratio, 1e-4), 1.0 - 1e-4)
+        nn.init.constant_(self.output.bias, math.log(ratio / (1.0 - ratio)))
+
+    def forward(self, bottleneck, scalar_embedding):
+        if self.gate_max <= self.gate_min:
+            return bottleneck.new_full((bottleneck.size(0), self.output.out_features, 1, 1), self.gate_min)
+        pooled = F.adaptive_avg_pool2d(bottleneck, 1).flatten(1)
+        logits = self.net(torch.cat([pooled, scalar_embedding], dim=1)).view(bottleneck.size(0), -1, 1, 1)
+        return self.gate_min + (self.gate_max - self.gate_min) * torch.sigmoid(logits)
+
+
 class ScalarGatedResUNet(nn.Module):
     def __init__(
         self,
@@ -253,6 +299,10 @@ class ScalarGatedResUNet(nn.Module):
         use_dual_stem=False,
         relative_in_channels=3,
         physics_in_channels=7,
+        use_dual_head=False,
+        dual_head_gate_min=0.0,
+        dual_head_gate_max=0.2,
+        dual_head_gate_init=0.02,
         **kwargs
     ):
         super().__init__()
@@ -264,6 +314,7 @@ class ScalarGatedResUNet(nn.Module):
         self.scalar_film_layers = parse_name_set(scalar_film_layers)
         self.use_aspp = as_bool(use_aspp)
         self.use_dual_stem = as_bool(use_dual_stem)
+        self.use_dual_head = as_bool(use_dual_head)
 
         c1 = base_channels
         c2 = base_channels * 2
@@ -344,6 +395,35 @@ class ScalarGatedResUNet(nn.Module):
             out_channels=out_channels,
             negative_slope=negative_slope,
         )
+        if self.use_dual_head:
+            self.aux_map_head = nn.Sequential(
+                nn.Conv2d(c1, c1 // 2, 3, 1, 1, bias=True),
+                build_norm(norm_type, c1 // 2),
+                nn.LeakyReLU(negative_slope, inplace=True),
+                nn.Conv2d(c1 // 2, out_channels, 1, 1, 0, bias=True),
+                build_output_activation(out_activation),
+            )
+            self.aux_scale_head = ScaleHead(
+                bottleneck_channels=c4,
+                scalar_channels=scalar_embedding_channels,
+                hidden_channels=scalar_embedding_channels,
+                out_channels=out_channels,
+                negative_slope=negative_slope,
+            )
+            self.fusion_gate_head = FusionGateHead(
+                bottleneck_channels=c4,
+                scalar_channels=scalar_embedding_channels,
+                hidden_channels=scalar_embedding_channels,
+                out_channels=out_channels,
+                gate_min=dual_head_gate_min,
+                gate_max=dual_head_gate_max,
+                gate_init=dual_head_gate_init,
+                negative_slope=negative_slope,
+            )
+        else:
+            self.aux_map_head = None
+            self.aux_scale_head = None
+            self.fusion_gate_head = None
 
     def apply_film(self, name, module, x, scalar_embedding):
         if not self.use_scalar_film or name not in self.scalar_film_layers:
@@ -352,6 +432,10 @@ class ScalarGatedResUNet(nn.Module):
 
     def zero_init_conditioning(self):
         self.scale_head.zero_init_output()
+        if self.aux_scale_head is not None:
+            self.aux_scale_head.zero_init_output()
+        if self.fusion_gate_head is not None:
+            self.fusion_gate_head.reset_gate()
         self.gate1.zero_init_gate()
         self.gate2.zero_init_gate()
         self.gate3.zero_init_gate()
@@ -387,6 +471,16 @@ class ScalarGatedResUNet(nn.Module):
             scalar = scalar.view(scalar.size(0), -1)
         return x, scalar.to(device=x.device, dtype=x.dtype)
 
+    def apply_prediction_scale(self, base_map, scale_head, bottleneck, scalar_embedding):
+        log_scale = scale_head(bottleneck, scalar_embedding)
+        if self.scale_log_clamp is not None:
+            scale_log_clamp = float(self.scale_log_clamp)
+            if scale_log_clamp <= 0:
+                log_scale = torch.zeros_like(log_scale)
+            else:
+                log_scale = scale_log_clamp * torch.tanh(log_scale / scale_log_clamp)
+        return base_map * torch.exp(log_scale)
+
     def forward(self, inputs):
         x, scalar = self.split_inputs(inputs)
         scalar_embedding = self.scalar_encoder(scalar)
@@ -421,15 +515,17 @@ class ScalarGatedResUNet(nn.Module):
             scalar_embedding,
         )
 
-        base_map = self.map_head(x)
-        log_scale = self.scale_head(b, scalar_embedding)
-        if self.scale_log_clamp is not None:
-            scale_log_clamp = float(self.scale_log_clamp)
-            if scale_log_clamp <= 0:
-                log_scale = torch.zeros_like(log_scale)
-            else:
-                log_scale = scale_log_clamp * torch.tanh(log_scale / scale_log_clamp)
-        return base_map * torch.exp(log_scale)
+        main = self.apply_prediction_scale(self.map_head(x), self.scale_head, b, scalar_embedding)
+        if not self.use_dual_head:
+            return main
+
+        aux = self.apply_prediction_scale(self.aux_map_head(x), self.aux_scale_head, b, scalar_embedding)
+        gate = self.fusion_gate_head(b, scalar_embedding)
+        return {
+            "main": main,
+            "aux": aux,
+            "gate": gate,
+        }
 
     def init_weights(self, pretrained=None, pretrained_transfer=None, strict=False, **kwargs):
         if isinstance(pretrained, str):

@@ -92,6 +92,31 @@ def build_loss(args):
             phys_norm=args.get('phys_norm', 'mean'),
             norm_eps=args.get('norm_eps', 1e-12),
             corr_eps=args.get('corr_eps', 1e-6),
+            hotspot_loss_weight=args.get('hotspot_loss_weight', 0.0),
+            hotspot_percentile=args.get('hotspot_percentile', 95.0),
+            hotspot_weight=args.get('hotspot_weight', 1.0),
+            hotspot_beta=args.get('hotspot_beta', 1.0),
+            hotspot_positive_only=args.get('hotspot_positive_only', True),
+            hotspot_min_value=args.get('hotspot_min_value', None),
+            hotspot_min_positive_pixels=args.get('hotspot_min_positive_pixels', 1),
+            gradient_loss_weight=args.get('gradient_loss_weight', 0.0),
+            gradient_beta=args.get('gradient_beta', 1.0),
+        )
+    if loss_type == 'DualHeadPhysLoss':
+        return losses.__dict__[loss_type](
+            corr_loss_weight=args.get('corr_loss_weight', 0.1),
+            ir_loss_weight=args.get('ir_loss_weight', 0.1),
+            aux_target_loss_weight=args.get('aux_target_loss_weight', 0.2),
+            aux_ir_loss_weight=args.get('aux_ir_loss_weight', 0.1),
+            fused_ir_loss_weight=args.get('fused_ir_loss_weight', 0.5),
+            fused_corr_loss_weight=args.get('fused_corr_loss_weight', 0.1),
+            consistency_loss_weight=args.get('consistency_loss_weight', 0.05),
+            target_scale_factor=args.get('target_scale_factor', 1.0),
+            target_clip_max=args.get('target_clip_max', None),
+            loss_weight=args.get('loss_weight', 100.0),
+            ir_norm=args.get('ir_norm', 'mean'),
+            norm_eps=args.get('norm_eps', 1e-12),
+            corr_eps=args.get('corr_eps', 1e-6),
         )
     return losses.__dict__[loss_type]()
 
@@ -277,6 +302,8 @@ def train():
 
     epoch_loss = 0
     epoch_loss_count = 0
+    loss_component_sums = {}
+    loss_component_count = 0
     train_loss_min_sum = 0
     train_loss_min_count = 0
     best_train_loss = float('inf')
@@ -315,6 +342,11 @@ def train():
                 epoch_loss_count += 1
                 train_loss_min_sum += loss_value
                 train_loss_min_count += 1
+                loss_components = getattr(loss, 'last_components', None)
+                if loss_components:
+                    for name, value in loss_components.items():
+                        loss_component_sums[name] = loss_component_sums.get(name, 0.0) + float(value.detach().cpu())
+                    loss_component_count += 1
                 pixel_loss.backward()
                 optimizer.step()
 
@@ -356,8 +388,17 @@ def train():
         avg_epoch_loss = epoch_loss / max(epoch_loss_count, 1)
         logger.info("===> Iters[{}]({}/{}): Loss: {:.4f}".format(iter_num, iter_num, arg_dict['max_iters'], avg_epoch_loss))
         writer.add_scalar('Loss/training loss', avg_epoch_loss, iter_num)
+        if loss_component_count > 0:
+            component_msg = []
+            for name in sorted(loss_component_sums.keys()):
+                value = loss_component_sums[name] / loss_component_count
+                component_msg.append('{}: {:.6f}'.format(name, value))
+                writer.add_scalar('LossComponents/{}'.format(name), value, iter_num)
+            logger.info('===> Loss components: {}'.format(', '.join(component_msg)))
         epoch_loss = 0
         epoch_loss_count = 0
+        loss_component_sums = {}
+        loss_component_count = 0
 
 
     writer.close()

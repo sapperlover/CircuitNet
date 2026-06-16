@@ -29,6 +29,56 @@ def resize_scale(input, out_shape):
 def build_metric(metric_name):
     return metrics.__dict__[metric_name.lower()]
 
+def safe_corrcoef(arr1, arr2):
+    arr1 = np.asarray(arr1, dtype=np.float64).reshape(-1)
+    arr2 = np.asarray(arr2, dtype=np.float64).reshape(-1)
+    finite = np.isfinite(arr1) & np.isfinite(arr2)
+    arr1 = arr1[finite]
+    arr2 = arr2[finite]
+    if arr1.size < 2 or arr2.size < 2:
+        return np.nan
+    if np.std(arr1) == 0 or np.std(arr2) == 0:
+        return np.nan
+    return float(np.corrcoef(arr1, arr2)[0][1])
+
+def tensor_to_numpy(data):
+    if torch.is_tensor(data):
+        return data.detach().cpu().numpy()
+    return np.asarray(data)
+
+def compute_map_level_metrics(pred_map, target_map):
+    pred_map = np.asarray(pred_map, dtype=np.float32)
+    target_map = np.asarray(target_map, dtype=np.float32)
+    pred_sum = pred_map.sum(axis=0)
+    target_sum = target_map.sum(axis=0)
+    channel_cc = [
+        safe_corrcoef(pred_map[channel], target_map[channel])
+        for channel in range(min(pred_map.shape[0], target_map.shape[0]))
+    ]
+    return {
+        'map_sum_MAE': float(np.mean(np.abs(pred_sum - target_sum))),
+        'map_sum_CC': safe_corrcoef(pred_sum, target_sum),
+        'map_flat2_CC': safe_corrcoef(pred_map, target_map),
+        'map_channel_avg_CC': float(np.nanmean(channel_cc)) if channel_cc else np.nan,
+    }
+
+def add_metric_value(avg_metrics, metric_counts, metric_name, value):
+    if not np.isfinite(value):
+        return
+    avg_metrics[metric_name] += float(value)
+    metric_counts[metric_name] += 1
+
+def add_split_metric_value(split_metrics, metric_name, design_name, value):
+    if not np.isfinite(value):
+        return
+    split_metrics[metric_name][design_name][0] += float(value)
+    split_metrics[metric_name][design_name][1] += 1
+
+def format_metric(metric_name, value):
+    if 'MAE' in metric_name:
+        return '{:.6f}'.format(value)
+    return '{:.4f}'.format(value)
+
 def move_to_device(data, device):
     if torch.is_tensor(data):
         return data.to(device)
@@ -83,8 +133,8 @@ def load_smooth_feature(feature_path, feature_name, out_shape, sigma):
     feature_map = np.maximum(feature_map, 0.0)
     return ndimage.gaussian_filter(feature_map, sigma=sigma, mode='nearest')
 
-def build_scale_base(feature_path, out_shape, arg_dict):
-    label_scale_mode = arg_dict.get('label_scale_mode', 'none')
+def build_scale_base(feature_path, out_shape, arg_dict, mode=None, effres_alpha=None):
+    label_scale_mode = arg_dict.get('label_scale_mode', 'none') if mode is None else mode
     if label_scale_mode == 'smooth_power':
         return load_smooth_feature(
             feature_path,
@@ -113,7 +163,7 @@ def build_scale_base(feature_path, out_shape, arg_dict):
         )
         return np.stack([power * eff_vdd, power * eff_vss], axis=2)
     if label_scale_mode in ('smooth_power_effres_alpha', 'power_effres_alpha'):
-        alpha = float(arg_dict.get('effres_alpha', 0.25))
+        alpha = float(arg_dict.get('effres_alpha', 0.25) if effres_alpha is None else effres_alpha)
         power = load_smooth_feature(
             feature_path,
             'total_power',
@@ -138,18 +188,61 @@ def build_scale_base(feature_path, out_shape, arg_dict):
         ], axis=2)
     raise ValueError('Unsupported label_scale_mode: {}'.format(label_scale_mode))
 
-def build_label_scale(feature_path, out_shape, arg_dict):
-    label_scale_mode = arg_dict.get('label_scale_mode', 'none')
+def build_label_scale(feature_path, out_shape, arg_dict, mode=None, effres_alpha=None):
+    label_scale_mode = arg_dict.get('label_scale_mode', 'none') if mode is None else mode
     if label_scale_mode in (None, 'none'):
         return None
-    scale_base = build_scale_base(feature_path, out_shape, arg_dict)
+    scale_base = build_scale_base(feature_path, out_shape, arg_dict, mode=label_scale_mode, effres_alpha=effres_alpha)
 
     power_epsilon = arg_dict.get('power_epsilon', None)
-    if power_epsilon is None:
+    if power_epsilon is None or mode is not None:
         epsilon = np.maximum(scale_base.max(axis=(0, 1)) * arg_dict.get('power_epsilon_ratio', 0.01), 1e-12)
     else:
         epsilon = np.asarray(power_epsilon, dtype=np.float32)
     return (scale_base + epsilon.reshape(1, 1, -1)).astype(np.float32)
+
+def target_tensor_to_ir_map(output, feature_path, arg_dict, label_norm_stats, mode=None, effres_alpha=None):
+    output = output.detach().cpu().numpy()
+    output = denormalize_channels(output, label_norm_stats)
+    label_scale = build_label_scale(feature_path, output.shape[1:], arg_dict, mode=mode, effres_alpha=effres_alpha)
+    if label_scale is not None:
+        target_scale_factor = arg_dict.get('target_scale_factor', 1.0)
+        output = output / target_scale_factor * label_scale.transpose(2, 0, 1)
+    return output
+
+def prediction_to_ir_map(prediction, feature_path, arg_dict, label_norm_stats):
+    if not isinstance(prediction, dict):
+        return target_tensor_to_ir_map(prediction[0], feature_path, arg_dict, label_norm_stats)
+
+    output_mode = arg_dict.get('test_output_mode', 'fused' if arg_dict.get('use_dual_head', False) else 'main')
+    main_ir = target_tensor_to_ir_map(prediction['main'][0], feature_path, arg_dict, label_norm_stats)
+    if output_mode == 'main':
+        return main_ir
+
+    aux_mode = arg_dict.get('aux_label_scale_mode', 'smooth_power_effres_alpha')
+    aux_alpha = arg_dict.get('aux_effres_alpha', arg_dict.get('effres_alpha', 0.25))
+    aux_ir = target_tensor_to_ir_map(
+        prediction['aux'][0],
+        feature_path,
+        arg_dict,
+        label_norm_stats,
+        mode=aux_mode,
+        effres_alpha=aux_alpha,
+    )
+    if output_mode == 'aux':
+        return aux_ir
+    if output_mode != 'fused':
+        raise ValueError('Unsupported test_output_mode: {}'.format(output_mode))
+
+    gate = prediction.get('gate')
+    if gate is None:
+        return main_ir
+    gate = gate[0].detach().cpu().numpy()
+    if gate.ndim == 1:
+        gate = gate[:, None, None]
+    if gate.shape[0] == 1 and main_ir.shape[0] != 1:
+        gate = np.repeat(gate, main_ir.shape[0], axis=0)
+    return (1.0 - gate) * main_ir + gate * aux_ir
 
 def test():
     
@@ -200,6 +293,10 @@ def test():
         'aspp_branch_channels',
         'aspp_res_scale',
         'use_dual_stem',
+        'use_dual_head',
+        'dual_head_gate_min',
+        'dual_head_gate_max',
+        'dual_head_gate_init',
         'relative_in_channels',
         'physics_in_channels',
         'map_input_features',
@@ -211,7 +308,9 @@ def test():
         'out_activation',
         'label_norm',
         'label_scale_mode',
+        'aux_label_scale_mode',
         'effres_alpha',
+        'aux_effres_alpha',
         'power_smooth_sigma',
         'effres_smooth_sigma',
         'power_epsilon_mode',
@@ -220,6 +319,7 @@ def test():
         'power_epsilon',
         'map_feature_norm_stats',
         'map_feature_std_clip',
+        'test_output_mode',
     ]
     for key in checkpoint_config_keys:
         if key in train_config:
@@ -259,6 +359,10 @@ def test():
     metrics = {k:build_metric(k) for k in arg_dict['eval_metric']}
     avg_metrics = {k:0 for k in arg_dict['eval_metric']}
     split_metrics = {k:{} for k in arg_dict['eval_metric']}
+    map_metric_names = ['map_sum_MAE', 'map_sum_CC', 'map_flat2_CC', 'map_channel_avg_CC']
+    map_avg_metrics = {k:0.0 for k in map_metric_names}
+    map_metric_counts = {k:0 for k in map_metric_names}
+    map_split_metrics = {k:{} for k in map_metric_names}
 
     count = 1
     start = True
@@ -271,6 +375,8 @@ def test():
         if design_name not in list(split_metrics.values())[0].keys() or start:
             for i in split_metrics.keys():
                 split_metrics[i][design_name] = [0, 0]
+            for i in map_split_metrics.keys():
+                map_split_metrics[i][design_name] = [0, 0]
             start = False
         if arg_dict['cpu']:
             input = feature
@@ -297,12 +403,15 @@ def test():
                 instance_name = np.load(instance_name_path[0].replace('instance_name', 'instance_name_from_power_rpt'))['instance_name'] # load npz
             
         instance_IR_drop = np.load(instance_IR_drop_path[0])
-        output_final = prediction[0].detach().cpu().numpy()
-        output_final = denormalize_channels(output_final, label_norm_stats)
-        label_scale = build_label_scale(feature_path[0], output_final.shape[1:], arg_dict)
-        if label_scale is not None:
-            target_scale_factor = arg_dict.get('target_scale_factor', 1.0)
-            output_final = output_final / target_scale_factor * label_scale.transpose(2, 0, 1)
+        output_final = prediction_to_ir_map(prediction, feature_path[0], arg_dict, label_norm_stats)
+        if not arg_dict['final_test']:
+            label_map = tensor_to_numpy(label)
+            if label_map.ndim == 4:
+                label_map = label_map[0]
+            map_metric_values = compute_map_level_metrics(output_final, label_map)
+            for metric_name, value in map_metric_values.items():
+                add_metric_value(map_avg_metrics, map_metric_counts, metric_name, value)
+                add_split_metric_value(map_split_metrics, metric_name, design_name, value)
         pred_vdd_drop = resize(output_final[0,:,:], instance_count.shape)
         pred_gnd_bounce = resize(output_final[1,:,:], instance_count.shape)
         pred_instance_vdd_drop = np.repeat(pred_vdd_drop.ravel(),instance_count.ravel())
@@ -354,6 +463,19 @@ def test():
                 continue
             for name, values in design.items():
                 logger.info("===> {} {}: {:.4f}".format(name, metric, values[0] / values[1]))
+        for metric, avg_metric in map_avg_metrics.items():
+            if map_metric_counts[metric] == 0:
+                continue
+            value = avg_metric / map_metric_counts[metric]
+            logger.info("===> Avg. {}: {}".format(metric, format_metric(metric, value)))
+        for metric, design in map_split_metrics.items():
+            if len(design) == 1:
+                continue
+            for name, values in design.items():
+                if values[1] == 0:
+                    continue
+                value = values[0] / values[1]
+                logger.info("===> {} {}: {}".format(name, metric, format_metric(metric, value)))
                  
     if save_report:
         logger.info("Predicted static_ir report saved in {}/{}.".format(log_dir, 'pred_static_ir_report')) 

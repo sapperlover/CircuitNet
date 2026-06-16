@@ -10,6 +10,7 @@ feature_extraction/data/
 feature_extraction/*.csv
 
 sample_model_training/work_dir/*
+sample_model_training/args/archive_unused_json_20260616
 
 feature_extraction/data/full/*
 
@@ -17,3 +18,8 @@ MAUnet/
 
 out/
 
+lc/
+
+ThermEDGe-and-IREDGe/
+
+CircuitNet/
